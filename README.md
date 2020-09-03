@@ -6,6 +6,3 @@ Install these modules for the program to work:
 * numpy
 * matplotlib
 * scipy
-
-## Unresolved bugs
-* Particles may stick together if they collide with very low velocity. An alternative code for offsetting the particles after collision may be required.
