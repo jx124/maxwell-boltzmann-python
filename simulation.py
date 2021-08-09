@@ -1,125 +1,200 @@
+import matplotlib.pyplot as plt
+from matplotlib import animation
 import numpy as np
-import matplotlib.pyplot as plt 
-import matplotlib.animation as mpla 
-import matplotlib.patches as mpatches
 from scipy.spatial.distance import pdist, squareform
+from matplotlib import rcParams
+rcParams['mathtext.fontset'] = 'cm'
 
-class Scene:
-    '''Initiates a scene containing particles with position pos, velocity vel, radius r and mass m.
-    Scene dimensions dim is a (2,) array, while pos and vel are (n, 2) arrays. Simulation runs
-    with timestep dt.'''
+class Particles:
+    '''Initialises a scene of particles with positions pos, velocities vel, accelerations accel, radii r, and mass m.
+    All of which are (n, 2) numpy arrays.'''
 
-    def __init__(self, dim, pos, vel, r, m, dt):
-        self.dim = dim
+    def __init__(self, pos, vel, accel, r = 0.01, m = 1):
         self.pos = pos
         self.vel = vel
+        self.accel = accel
         self.r = r
         self.m = m
-        self.dt = dt
         self.n = np.shape(pos)[0]
         
-    def advance(self):
-        '''Advance particle by time step dt.'''
-        self.pos += self.vel * self.dt
+        self.KE = 0.5 * self.m * np.sum(self.vel**2)
+        self.m_over_2kT = (self.n * self.m)/(2 * self.KE)
 
-        #Checks for collisions with walls
-        hit_left = self.pos[:,0] < self.r 
-        hit_right = self.pos[:,0] > self.dim[0] - self.r 
-        hit_top = self.pos[:,1] > self.dim[1] - self.r
-        hit_bottom = self.pos[:,1] < self.r
+    def update(self, dt, box):
+        '''Updates the positions and velocities of the particles after time step dt.'''
+        self.vel += self.accel*dt
+        self.pos_temp = self.pos + self.vel*dt
+        
+        self.sweep_and_prune() 
+        self.handle_box_collision(box) 
+        
+        self.pos = self.pos_temp
+  
+    def handle_box_collision(self, box):
+        '''Calculates particle positions and velocities after collision with the box.'''
+        # Check if particles are outside the box
+        hit_left = self.pos_temp[:,0] - self.r <= box.left
+        hit_right = self.pos_temp[:,0] + self.r >= box.right
+        hit_bottom = self.pos_temp[:,1] - self.r <= box.bottom
+        hit_top = self.pos_temp[:,1] + self.r >= box.top
 
-        #Updates particle position after wall collision
-        self.pos[:,0] = np.where(hit_right, self.dim[0] - self.r - 2 * np.abs(self.pos[:,0] - self.dim[0] + self.r), self.pos[:,0])
-        self.pos[:,0] = np.where(hit_left, self.r + 2 * np.abs(self.pos[:,0] - self.r), self.pos[:,0])
-        self.pos[:,1] = np.where(hit_top, self.dim[1] - self.r - 2 * np.abs(self.pos[:,1] - self.dim[1] + self.r), self.pos[:,1])
-        self.pos[:,1] = np.where(hit_bottom, self.r + 2 * np.abs(self.pos[:,1] - self.r), self.pos[:,1])
+        # Adjusting positions of particles outside of box
+        self.pos_temp[:,0] = np.where(hit_left, 2*(box.left + self.r) - self.pos_temp[:,0], self.pos_temp[:,0])
+        self.pos_temp[:,0] = np.where(hit_right, 2*(box.right - self.r) - self.pos_temp[:,0], self.pos_temp[:,0])
+        self.pos_temp[:,1] = np.where(hit_bottom, 2*(box.bottom + self.r) - self.pos_temp[:,1], self.pos_temp[:,1])
+        self.pos_temp[:,1] = np.where(hit_top, 2*(box.top-self.r) - self.pos_temp[:,1], self.pos_temp[:,1])
 
-        #Flips particle velocity after wall collision
+        # Flip velocities of particles that hit the edges of the box
         self.vel[hit_left | hit_right, 0] *= -1
         self.vel[hit_bottom | hit_top, 1] *= -1
 
-        #Calculates pairwise distances to check for particle collisions
-        dists = squareform(pdist(self.pos))
-        i, j = np.asarray(np.triu(dists <= self.r, k=1)).nonzero()
+        # Rechecks if any particles are still outside the box (e.g. when particles hit near a corner)
+        hit_left = self.pos_temp[:,0] - self.r <= box.left
+        hit_right = self.pos_temp[:,0] + self.r >= box.right
+        hit_bottom = self.pos_temp[:,1] - self.r <= box.bottom
+        hit_top = self.pos_temp[:,1] + self.r >= box.top
+            
+        # Repeats until none of the particles are outside
+        if np.any([hit_left | hit_right | hit_top | hit_bottom]):
+            self.handle_box_collision(box)
         
-        #Updating particle velocties after collision
-        for i, j in zip(i, j):
+    def sweep_and_prune(self):
+        '''Implements the "Sweep and Prune" algorithm to reduce the number of pairwise distance calculations required.'''
+        # Sort particles by their y coordinates
+        self.sorted = np.sort(self.pos_temp[:,1])
+        self.indices = np.argsort(self.pos_temp[:,1])
+
+        flag = False
+        active = set({})
+        
+        # For each particle, if its interval intersects with that of the next particle, add it to the active set
+        for i in range(1,self.n):
+            if self.sorted[i] - self.sorted[i-1] < 2 * self.r:
+                active.update((self.indices[i-1],self.indices[i]))
+                flag = True  
+            elif flag == True:
+                # When the previous particle no longer intersects, pass the active set to the collision calculations
+                self.calculate_collisions(np.array(list(active)))
+                active = set({})
+                flag = False
+            else:
+                pass
+            
+        # Pass the last active set to the collision calculations
+        self.calculate_collisions(np.array(list(active)))
+
+    def calculate_collisions(self, active):
+        '''Calculate the collisions among the active particles determined by the "Sweep and Prune" algorithm.'''
+        # Check the pairwise distances between particles in the active set and return a mask of intersecting particles
+        # If none are intersecting, return a mask of all False
+        try:
+            dists = squareform(pdist(self.pos_temp[active]))
+            mask = np.transpose(np.triu(dists <= 2*self.r, k=1).nonzero())
+        except:
+            mask = np.ma.make_mask_none(np.shape(active))
+        
+        # Update positions and velocities of colliding particles
+        for i, j in active[mask]:
             v_rel = self.vel[i] - self.vel[j]
             x_rel = self.pos[i] - self.pos[j]
             delta_v = (v_rel.dot(x_rel) * x_rel) / (np.linalg.norm(x_rel) ** 2)
             self.vel[i] -= delta_v
             self.vel[j] += delta_v
-            #Offset to prevent clipping 
+
             c = np.linalg.norm(x_rel) - 2 * self.r
-            self.pos[i] -= x_rel * c/2
-            self.pos[j] += x_rel * c/2
-
-        #Updating calculations
+            self.pos_temp[i] -= x_rel * c/2
+            self.pos_temp[j] += x_rel * c/2
+            
         self.KE = 0.5 * self.m * np.sum(self.vel**2)
-        self.mover2kT = (self.n * self.m)/(2 * self.KE)
+        self.m_over_2kT = (self.n * self.m)/(2 * self.KE)
+        
+class Box:
+    '''Creates a sqaure box object with the given boundaries.'''
+    def __init__(self, top, bottom, left, right):
+        self.top = top
+        self.bottom = bottom
+        self.left = left
+        self.right = right
 
-#Initialising variables
-n = 300                                         #number of particles
-dim = (1, 1)                                    #length of box in the x and y directions
-pos = np.random.random((n,2))                   #initial positions
-vel = 0.5 * (np.random.random((n,2)) - 0.5)     #initial velocities
-r = 0.015                                       #particle radii
-m = 1                                           #paricle mass
-dt = 1/30                                       #1/desired FPS
-nbins = 40                                      #number of bins for histogram
+# Setting up the simulation by creating a square grid of particles all going in a single direction with no acceleration
+x = np.linspace(0.1,0.9,20)
+y = np.linspace(0.1,0.9,20)
+X,Y = np.meshgrid(x,y)
 
-#Creating simulation scene and initialising settings
-scene = Scene(dim, pos, vel, r, m, dt)
-fig, (sim, ax) = plt.subplots(1,2, constrained_layout = True)
-sim.set_xlim(0, dim[0])
-sim.set_ylim(0, dim[1])
+positions = np.vstack([Y.ravel(), X.ravel()]).T
+velocities = np.ones_like(positions) * (0.5,0.3) + np.random.randn(*np.shape(positions)) * 0.01
+accels = np.zeros_like(positions) 
+
+p = Particles(positions, velocities, accels, 0.007)
+b = Box(1.0, 0.0, 0.0, 1.0)
+dt = 1/100
+nbins = 40
+
+# Creating plots
+fig, (sim, hist) = plt.subplots(1, 2, figsize=(10,5))
+
+# Simulation plot settings
+sim.set_xlim(b.left, b.right)
+sim.set_ylim(b.bottom, b.top)
 sim.set_aspect('equal')
 sim.set(xticks = [], yticks = [])
 
-#Calculates correct scale for histogram
-scene.advance()
-vp = 1/np.sqrt(scene.mover2kT)
-xdim = (-0.1 * vp, 5 * vp)
-ydim = (0, 3 * vp * scene.mover2kT * np.exp(-1))
-ax.set_aspect((xdim[1]-xdim[0])/(ydim[1]-ydim[0]))
+# Scaling constants
+v_peak = 1/np.sqrt(p.m_over_2kT)
+x_dims = (-0.1 * v_peak, 5 * v_peak)
+y_dims = (0, 1.1 * v_peak * p.m_over_2kT)
 
-#Calculation for theoretical distribution
-boltzmannX = np.linspace(0, xdim[1], 100)
-boltzmannY = 2 * scene.mover2kT * boltzmannX * np.exp(-scene.mover2kT * boltzmannX ** 2) 
+# Histogram plot settings
+hist.set(xlim = x_dims, ylim = y_dims)
+hist.set_xlabel('Speed $(m\ s^{-1})$', fontsize=12)
+hist.set_ylabel('Frequency $(s\ m^{-1})$', fontsize=12)
+hist.set_aspect((x_dims[1]-x_dims[0])/(y_dims[1]-y_dims[0]))
 
-#Plots
-histogram = ax.hist([], bins = nbins)
-approx = histogram[0]
-particles, = sim.plot([],[], 'ko', markersize = 2)
+# Text box for displaying elapsed time
+time_text = hist.text(0.7, 0.75, '', transform=hist.transAxes,
+                      fontsize=15, bbox = dict(facecolor = 'white', edgecolor = 'black'))
 
+# Initialise approx and calculate theoretical distribution
+approx = np.zeros(nbins)
+theoretical_X = np.linspace(0, x_dims[1], 100)
+theoretical_Y = 2 * p.m_over_2kT * theoretical_X * np.exp(-p.m_over_2kT * theoretical_X ** 2) 
+
+# Plot lines
+ln_sim, = sim.plot([], [],c='k', linewidth=0, ms=4, marker='o')
+ln_hist, = hist.plot(theoretical_X, theoretical_Y, 'k--', lw=1.5, label='Theoretical')
+ln_approx, = hist.plot([], [], 'r', lw=2, label ='Average')
+
+# Plot histogram
+bins = np.linspace(0, x_dims[1], 40)
+_, _, bin_container = hist.hist(np.linalg.norm(p.vel, axis=1), bins = bins,
+                                density=True, color='tab:blue', label='Histogram')
+
+plt.legend(loc='upper right')
+plt.tight_layout()
+
+# Animation code
 def animate(i):
-    scene.advance()
-
-    #Plot particles
-    particles.set_data(scene.pos[:,0],scene.pos[:,1])
-
-    #Set axes
-    ax.cla()
-    ax.set_xlabel('Speed')
-    ax.set_ylabel('Frequency')
-    ax.set(xlim= xdim, ylim = ydim)
+    # Update particle locations and time value
+    ln_sim.set_data(p.pos[:,0], p.pos[:,1])
+    time_text.set_text(f"$t={i*dt:.2f}\ s$")
     
-    #Plot theoretical and measured distributions
-    boltzmann, = ax.plot(boltzmannX, boltzmannY, label = 'Theoretical', color = 'k')
-    histogram = ax.hist(np.linalg.norm(scene.vel,axis=1), color = 'mediumblue', alpha = 0.7,
-    bins = np.linspace(0, xdim[1], nbins+1), density = 1, align = 'mid')
+    # Update histogram
+    speeds = np.linalg.norm(p.vel, axis=1)
+    n, _ = np.histogram(speeds, bins = bins, density=True)
+    for count, rect in zip(n, bin_container):
+        rect.set_height(count)
     
-    #Calculate and plot the average of the measured distribution
+    # Update average velocity plot
     global approx
-    approx = approx + 2 / (i + 1) * (histogram[0] - approx)
-    average, = ax.plot(np.linspace(0, xdim[1], nbins) + boltzmannX[1] / 2, approx, color = 'red', label = 'Average')
-
-    #Create legend
-    blue_patch = mpatches.Patch(color='b', alpha = 0.7, label='Measured')
-    plt.legend(handles=[blue_patch, boltzmann, average])
-
-    return particles, boltzmann, histogram, average
-
-#Animation of 1000 frames at 30 FPS
-anim = mpla.FuncAnimation(plt.gcf(), animate, 1000, interval = 1000/30)
-plt.show()
+    approx = approx + 2 / (i + 1) * (np.concatenate((np.array([0]), n)) - approx)
+    approx_x = np.concatenate((np.array([0]),np.linspace(0, x_dims[1], nbins-1) + x_dims[1]/((nbins-1)*2)))
+    ln_approx.set_data(approx_x, approx)
+    
+    # Update particles
+    p.update(dt, b)
+    
+    return ln_sim, ln_approx, rect
+    
+# Create and save animation
+ani = animation.FuncAnimation(fig, animate, frames = 2, interval=50, blit = True, repeat=True, repeat_delay=1000)
+ani.save('particle.gif', writer = 'pillow', fps = 50, dpi = 200)
