@@ -196,5 +196,5 @@ def animate(i):
     return ln_sim, ln_approx, rect
     
 # Create and save animation
-ani = animation.FuncAnimation(fig, animate, frames = 2, interval=50, blit = True, repeat=True, repeat_delay=1000)
+ani = animation.FuncAnimation(fig, animate, frames = 2000, interval=50, blit = True, repeat=True, repeat_delay=1000)
 ani.save('particle.gif', writer = 'pillow', fps = 50, dpi = 200)
